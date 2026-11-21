@@ -2,28 +2,37 @@
 
 A personal Fire TV app for udemy.com, built for the remote.
 
-## Pages: pointer
+## Pages — two control styles (☰ → Control style)
+
+**Pointer (default)**
 
 | Button | Action |
 |---|---|
 | ◀ ▲ ▼ ▶ | Glide the pointer (short press = small step, hold = faster) |
-| OK | Click. On a text box (email, password, OTP, search, Q&A) a fast native input box opens |
-| ⏪ / ⏩ | Scroll up / down (or push the pointer against a screen edge) |
-| ⏯ twice | Video fullscreen |
-| Back | Previous page (twice on the first page = exit) |
-| ☰ | Menu: My Learning, Search, Back/Forward, Pointer on/off, Pointer speed, Screen layout, Text size, Faster browsing, Help, Sign out |
+| OK | Click. Text boxes open a fast native input box. Video player controls work too |
+| ⏪ / ⏩ | Scroll a screen (the panel under the pointer, e.g. the lecture list) |
+| Push pointer against an edge | Scroll that column (lecture list or page) |
 
-## Fullscreen video: remote controls (automatic)
+**Navigation** (like the YouTube app, no pointer)
 
-| Button | Single press | Double press |
-|---|---|---|
-| OK / ⏯ | Play / pause | Fullscreen on / off |
-| ▶ / ◀ | +5 s / −5 s (hold to keep skipping) | Next / previous lecture |
-| ▲ | Faster | Normal speed (1×) |
-| ▼ | Slower | Captions on / off |
-| ⏩ / ⏪ | Next / previous lecture | |
-| Back | Leave fullscreen | |
-| ☰ | Video menu: speed list, captions, ±30 s, restart, pointer on/off, help | |
+| Button | Action |
+|---|---|
+| ◀ ▲ ▼ ▶ | Move the purple highlight (stays inside the lecture list while it scrolls) |
+| OK | Open / click (on the video: play / pause) |
+| ⏪ / ⏩ | Scroll a screen |
+
+Everywhere: ⏯ play / pause, Back = close popup or previous page, ☰ = menu.
+
+## Fullscreen video (☰ → Watch fullscreen)
+
+| Button | Action |
+|---|---|
+| OK / ⏯ | Play / pause |
+| ◀ / ▶ | −5 s / +5 s (hold to keep skipping) |
+| ▲ / ▼ | Faster / slower (0.5× – 2×) |
+| ⏪ / ⏩ | Previous / next lecture (fullscreen comes back on the new lecture) |
+| Back | Exit fullscreen |
+| ☰ | Video menu: speed list, captions, ±30 s, restart, exit fullscreen, help |
 
 ## Install / update on Fire TV
 

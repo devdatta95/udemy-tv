@@ -50,22 +50,19 @@ import kotlin.math.min
 /**
  * Udemy for Fire TV.
  *
- * POINTER mode (normal pages): arrows glide a small mouse pointer, OK clicks. Clicking a text field
- * opens a fast native input box instead of the slow in-page keyboard.
+ * Pages are controlled in one of two styles (switch in the ☰ menu):
+ *   POINTER     arrows glide a mouse pointer, OK clicks (default)
+ *   NAVIGATION  arrows move a highlight between items like the YouTube app, OK opens
  *
- * REMOTE mode (switches on automatically in fullscreen video):
- *   OK / ⏯      play-pause            double press: fullscreen on/off
- *   ◀ / ▶       −5 s / +5 s (hold)     double press: previous / next lecture
- *   ▲ / ▼       speed up / down        double press: ▲ normal speed, ▼ captions on/off
- *   ⏪ / ⏩      previous / next lecture
- *   Back        leave fullscreen        ☰ video menu
+ * Fullscreen video (☰ → Watch fullscreen) always uses the remote:
+ *   OK / ⏯  play-pause     ◀ ▶  −5 s / +5 s (hold to keep going)     ▲ ▼  speed up / down
+ *   ⏪ ⏩  previous / next lecture     Back  exit fullscreen     ☰  video menu
  */
 class MainActivity : Activity() {
 
     companion object {
         const val HOME = "https://www.udemy.com/home/my-courses/learning/"
         const val SITE = "https://www.udemy.com/"
-        private const val DOUBLE_MS = 300L
         private const val PURPLE = 0xFFA435F0.toInt()
         private val ZOOMS = intArrayOf(100, 115, 130, 85)
         private val WIDTHS = intArrayOf(1280, 1440, 1100, 0)
@@ -87,8 +84,6 @@ class MainActivity : Activity() {
         private val EMPTY = ByteArray(0)
     }
 
-    private enum class Mode { POINTER, REMOTE }
-
     private lateinit var root: FrameLayout
     private lateinit var web: WebView
     private lateinit var cursor: CursorView
@@ -105,15 +100,15 @@ class MainActivity : Activity() {
     private var path = ""
     private var lastFs = false
 
-    // modes
-    private var mode = Mode.POINTER
-    private var manualMode = false        // user toggled the pointer; keep it until fullscreen changes
-    private var wantFsUntil = 0L          // re-enter fullscreen after a lecture change
-    private var jumpPath = ""
+    // control style for pages
+    private var navStyle = false
 
-    // fullscreen video view from the page
+    // fullscreen
     private var customView: View? = null
     private var customCallback: WebChromeClient.CustomViewCallback? = null
+    private var fsWanted = false        // user asked for fullscreen; restore it when the lecture changes
+    private var lastFsTry = 0L
+    private var fsTries = 0
 
     // pointer
     private var cx = 0f
@@ -123,16 +118,14 @@ class MainActivity : Activity() {
     private var lastFrameNs = 0L
     private var lastHover = 0L
     private var lastWheel = 0L
+    private var edgeX = -1f              // where to scroll while pushing an edge (a side panel, not the header)
+    private var edgeY = -1f
+    private var edgeKey = 0
     private var okHeld = false
     private var touchSent = false
     private var touchDownTime = 0L
 
-    // single / double press
-    private var lastPressKey = 0
-    private var lastPressTime = 0L
-    private var pendingSingle: Runnable? = null
-    private var immediateArmed = false
-
+    private var lastNavKey = 0L
     private var lastBack = 0L
 
     /* ===================================================================== setup */
@@ -142,6 +135,7 @@ class MainActivity : Activity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         navJs = assets.open("tvnav.js").bufferedReader().use { it.readText() }
         blockTrackers = prefs.getBoolean("block", true)
+        navStyle = prefs.getBoolean("nav", false)
 
         root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         setContentView(root)
@@ -171,6 +165,7 @@ class MainActivity : Activity() {
             cx = root.width / 2f
             cy = root.height / 2f
             cursor.place(cx, cy)
+            updatePointerVisibility()
         }
         if (savedInstanceState == null || web.restoreState(savedInstanceState) == null) web.loadUrl(HOME)
     }
@@ -230,7 +225,7 @@ class MainActivity : Activity() {
         web.loadUrl(url)
     }
 
-    /* ===================================================================== JS bridge helpers */
+    /* ===================================================================== JS helpers */
 
     private fun js(code: String) = web.evaluateJavascript(code, null)
 
@@ -243,11 +238,7 @@ class MainActivity : Activity() {
     /** Run a video action in the page and show its result on screen. */
     private fun media(action: String) {
         web.evaluateJavascript("window.__tv ? __tv.media('$action') : ''") { r ->
-            val msg = jsString(r)
-            when {
-                msg.startsWith("MENU:") -> { osd(msg.removePrefix("MENU:")); manualMode = true; setMode(Mode.POINTER, false) }
-                msg.isNotEmpty() -> osd(msg)
-            }
+            jsString(r).takeIf { it.isNotEmpty() }?.let { osd(it) }
         }
     }
 
@@ -263,11 +254,12 @@ class MainActivity : Activity() {
         ui.postDelayed(hideOsd, ms)
     }
 
-    /* ===================================================================== page state & modes */
+    /* ===================================================================== page state */
 
     private val poll = object : Runnable {
         override fun run() {
-            web.evaluateJavascript("JSON.stringify(window.__tv ? __tv.state() : null)") { onState(it) }
+            val nav = navStyle && !isFs()
+            web.evaluateJavascript("JSON.stringify(window.__tv ? __tv.state($nav) : null)") { onState(it) }
             ui.postDelayed(this, 700)
         }
     }
@@ -279,48 +271,45 @@ class MainActivity : Activity() {
         hasVideo = s?.optBoolean("v") == true || customView != null
         jsFs = s?.optBoolean("fs") == true && customView == null
         path = s?.optString("path") ?: path
-
-        // After next/previous lecture in fullscreen, go fullscreen again on the new lecture.
-        if (wantFsUntil > SystemClock.uptimeMillis() && path != jumpPath) {
-            if (isFs()) wantFsUntil = 0
-            else if (hasVideo) { wantFsUntil = 0; enterFullscreen() }
-        }
         onFsChanged()
-        if (!hasVideo && !isFs() && mode == Mode.REMOTE && !manualMode && wantFsUntil < SystemClock.uptimeMillis()) {
-            setMode(Mode.POINTER, false)
+
+        // The lecture changed while in fullscreen (the video was replaced): go fullscreen again.
+        val now = SystemClock.uptimeMillis()
+        if (fsWanted && !isFs() && hasVideo && fsTries < 3 && now - lastFsTry > 2500) {
+            fsTries++
+            requestFullscreen()
         }
     }
 
-    /** Remote video controls only in fullscreen; the pointer everywhere else. */
     private fun onFsChanged() {
         val fs = isFs()
         if (fs == lastFs) return
         lastFs = fs
-        if (!fs && wantFsUntil > SystemClock.uptimeMillis()) return // lecture changing, fullscreen comes back
-        manualMode = false
-        setMode(if (fs) Mode.REMOTE else Mode.POINTER)
-    }
-
-    private fun setMode(m: Mode, announce: Boolean = true) {
-        if (mode == m) return
-        mode = m
         stopMove()
         releaseOk()
-        if (m == Mode.POINTER) showCursor() else { cursor.animate().cancel(); cursor.visibility = View.GONE }
-        if (!announce) return
-        if (m == Mode.REMOTE && hasVideo) {
-            if (!prefs.getBoolean("helpShown", false)) { prefs.edit().putBoolean("helpShown", true).apply(); showHelp() }
-            else osd("Remote controls  •  ☰ menu  •  Back exits fullscreen", 2200)
-        } else if (m == Mode.REMOTE) {
-            osd("Pointer off:  ▲ ▼ scroll  •  OK = pointer", 2200)
-        } else {
-            osd("Pointer", 1000)
+        if (fs) {
+            fsTries = 0
+            if (!prefs.getBoolean("helpShown2", false)) {
+                prefs.edit().putBoolean("helpShown2", true).apply()
+                showHelp()
+            } else osd("◀ ▶ 5 s   ▲ ▼ speed   ⏪ ⏩ lecture   Back exits   ☰ menu", 3000)
         }
+        updatePointerVisibility()
     }
 
-    private fun togglePointer() {
-        manualMode = true
-        setMode(if (mode == Mode.POINTER) Mode.REMOTE else Mode.POINTER)
+    private fun updatePointerVisibility() {
+        if (!navStyle && !isFs()) showCursor()
+        else { cursor.animate().cancel(); cursor.visibility = View.GONE }
+    }
+
+    private fun setNavStyle(on: Boolean) {
+        navStyle = on
+        prefs.edit().putBoolean("nav", on).apply()
+        stopMove()
+        releaseOk()
+        js("window.__tv && __tv.state($on)")
+        updatePointerVisibility()
+        osd(if (on) "Navigation mode:  arrows move the highlight  •  OK opens" else "Pointer mode:  arrows move the pointer  •  OK clicks", 2500)
     }
 
     /* ===================================================================== keys */
@@ -330,53 +319,53 @@ class MainActivity : Activity() {
         val down = e.action == KeyEvent.ACTION_DOWN
         val first = down && e.repeatCount == 0
 
+        if (isFs()) return fullscreenKey(e, code, down, first)
+
         when (code) {
             KeyEvent.KEYCODE_BACK -> { if (first) onBack(); return true }
-            KeyEvent.KEYCODE_MENU -> { if (first) { if (hasVideo) showVideoMenu() else showMainMenu() }; return true }
+            KeyEvent.KEYCODE_MENU -> { if (first) showMainMenu(); return true }
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE -> {
-                if (first && hasVideo) delayed(code, { media("playpause") }, { toggleFullscreen() })
+                if (first) { if (hasVideo) media(playAction(code)) else osd("No video on this page") }
+                return true
+            }
+            KeyEvent.KEYCODE_MEDIA_REWIND, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                if (down) scrollPage(if (code == KeyEvent.KEYCODE_MEDIA_REWIND) 1f else -1f)
                 return true
             }
         }
-        return if (mode == Mode.REMOTE) remoteKey(e, code, down, first) else pointerKey(e, code, down, first)
+        return if (navStyle) navKey(e, code, down, first) else pointerKey(e, code, down, first)
     }
 
     private fun isOk(code: Int) =
         code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER
 
-    private fun remoteKey(e: KeyEvent, code: Int, down: Boolean, first: Boolean): Boolean {
-        if (!hasVideo) { // pointer switched off on a normal page: arrows scroll
-            when {
-                code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_DPAD_DOWN -> {
-                    if (down) wheelAt(root.width / 2f, root.height / 2f, 0f,
-                        (if (code == KeyEvent.KEYCODE_DPAD_UP) 1f else -1f) * (1.5f + min(e.repeatCount, 10) * 0.3f))
-                }
-                code == KeyEvent.KEYCODE_MEDIA_REWIND || code == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                    if (down) wheelAt(root.width / 2f, root.height / 2f, 0f, if (code == KeyEvent.KEYCODE_MEDIA_REWIND) 6f else -6f)
-                }
-                isOk(code) -> if (first) { manualMode = true; setMode(Mode.POINTER) }
-                code == KeyEvent.KEYCODE_DPAD_LEFT || code == KeyEvent.KEYCODE_DPAD_RIGHT -> {}
-                else -> return super.dispatchKeyEvent(e)
-            }
-            return true
-        }
+    private fun playAction(code: Int) = when (code) {
+        KeyEvent.KEYCODE_MEDIA_PLAY -> "play"
+        KeyEvent.KEYCODE_MEDIA_PAUSE -> "pause"
+        else -> "playpause"
+    }
+
+    /** Your remote layout for fullscreen video. */
+    private fun fullscreenKey(e: KeyEvent, code: Int, down: Boolean, first: Boolean): Boolean {
         when (code) {
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER,
+            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE ->
+                if (first) media(playAction(code))
             KeyEvent.KEYCODE_DPAD_RIGHT -> when {
-                first -> immediate(code, { media("fwd5") }, { media("next"); onLectureJump() })
+                first -> media("fwd5")
                 down && e.repeatCount % 3 == 0 -> media(if (e.repeatCount < 18) "fwd10" else "fwd30")
             }
             KeyEvent.KEYCODE_DPAD_LEFT -> when {
-                first -> immediate(code, { media("back5") }, { media("prev"); onLectureJump() })
+                first -> media("back5")
                 down && e.repeatCount % 3 == 0 -> media(if (e.repeatCount < 18) "back10" else "back30")
             }
-            KeyEvent.KEYCODE_DPAD_UP -> if (first) delayed(code, { media("faster") }, { media("normal") })
-            KeyEvent.KEYCODE_DPAD_DOWN -> if (first) delayed(code, { media("slower") }, { media("captions") })
-            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> if (first) { media("next"); onLectureJump() }
-            KeyEvent.KEYCODE_MEDIA_REWIND -> if (first) { media("prev"); onLectureJump() }
-            else -> {
-                if (isOk(code)) { if (first) delayed(code, { media("playpause") }, { toggleFullscreen() }) }
-                else return super.dispatchKeyEvent(e)
-            }
+            KeyEvent.KEYCODE_DPAD_UP -> if (first) media("faster")
+            KeyEvent.KEYCODE_DPAD_DOWN -> if (first) media("slower")
+            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> if (first) changeLecture(1)
+            KeyEvent.KEYCODE_MEDIA_REWIND -> if (first) changeLecture(-1)
+            KeyEvent.KEYCODE_BACK -> if (first) exitFullscreen()
+            KeyEvent.KEYCODE_MENU -> if (first) showVideoMenu()
+            else -> return super.dispatchKeyEvent(e)
         }
         return true
     }
@@ -389,10 +378,6 @@ class MainActivity : Activity() {
                 else if (e.action == KeyEvent.ACTION_UP && moveKey == code) stopMove()
                 return true
             }
-            KeyEvent.KEYCODE_MEDIA_REWIND, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                if (down) wheelAt(cx, cy, 0f, if (code == KeyEvent.KEYCODE_MEDIA_REWIND) 6f else -6f)
-                return true
-            }
         }
         if (isOk(code)) {
             if (first) okDown() else if (e.action == KeyEvent.ACTION_UP) okUp()
@@ -401,57 +386,90 @@ class MainActivity : Activity() {
         return super.dispatchKeyEvent(e)
     }
 
-    /** Single action waits a moment to see whether a second press follows. */
-    private fun delayed(code: Int, single: () -> Unit, double: () -> Unit) {
-        val now = SystemClock.uptimeMillis()
-        val pending = pendingSingle
-        if (lastPressKey == code && pending != null && now - lastPressTime < DOUBLE_MS) {
-            ui.removeCallbacks(pending)
-            pendingSingle = null
-            lastPressKey = 0
-            double()
-            return
+    private fun navKey(e: KeyEvent, code: Int, down: Boolean, first: Boolean): Boolean {
+        val dir = when (code) {
+            KeyEvent.KEYCODE_DPAD_UP -> "up"
+            KeyEvent.KEYCODE_DPAD_DOWN -> "down"
+            KeyEvent.KEYCODE_DPAD_LEFT -> "left"
+            KeyEvent.KEYCODE_DPAD_RIGHT -> "right"
+            else -> null
         }
-        flushPending()
-        immediateArmed = false
-        lastPressKey = code
-        lastPressTime = now
-        val r = Runnable { pendingSingle = null; single() }
-        pendingSingle = r
-        ui.postDelayed(r, DOUBLE_MS)
-    }
-
-    /** Single action happens at once (seeking feels instant); a quick second press does the double action. */
-    private fun immediate(code: Int, single: () -> Unit, double: () -> Unit) {
-        val now = SystemClock.uptimeMillis()
-        if (lastPressKey == code && immediateArmed && now - lastPressTime < DOUBLE_MS) {
-            immediateArmed = false
-            lastPressKey = 0
-            double()
-            return
+        if (dir != null) {
+            val now = SystemClock.uptimeMillis()
+            if (down && (first || now - lastNavKey > 140)) { // holding moves steadily, without flooding a slow page
+                lastNavKey = now
+                web.evaluateJavascript("window.__tv ? __tv.navMove('$dir') : ''") { r ->
+                    jsString(r).takeIf { it.isNotEmpty() }?.let { osd(it) }
+                }
+            }
+            return true
         }
-        flushPending()
-        lastPressKey = code
-        lastPressTime = now
-        immediateArmed = true
-        single()
+        if (isOk(code)) {
+            if (first) web.evaluateJavascript("JSON.stringify(window.__tv ? __tv.navOk() : null)") { onClickResult(jsObject(it)) }
+            return true
+        }
+        return super.dispatchKeyEvent(e)
     }
 
-    private fun flushPending() {
-        pendingSingle?.let { ui.removeCallbacks(it); pendingSingle = null; it.run() }
+    /* ===================================================================== clicks */
+
+    /** Result of OK from the page: text box, fullscreen button, a real tap, or already handled. */
+    private fun onClickResult(r: JSONObject?): Boolean {
+        when (r?.optString("t")) {
+            "text" -> showTextInput(r)
+            "fs" -> enterFullscreen()
+            "tap" -> tapAt(r.optDouble("fx").toFloat() * web.width, r.optDouble("fy").toFloat() * web.height)
+            "done" -> r.optString("msg").takeIf { it.isNotEmpty() }?.let { osd(it) }
+            else -> return false
+        }
+        return true
     }
 
-    private fun onLectureJump() {
-        if (isFs()) { wantFsUntil = SystemClock.uptimeMillis() + 20000; jumpPath = path }
+    private fun okDown() {
+        showCursor()
+        okHeld = true
+        touchSent = false
+        val fx = cx / web.width
+        val fy = cy / web.height
+        web.evaluateJavascript("JSON.stringify(window.__tv ? __tv.hit($fx, $fy) : null)") { raw ->
+            if (onClickResult(jsObject(raw))) {
+                okHeld = false
+            } else {
+                // Not a text box or the video player: a real tap (works everywhere, also in frames).
+                touch(MotionEvent.ACTION_DOWN)
+                touchSent = true
+                if (!okHeld) { touch(MotionEvent.ACTION_UP); touchSent = false }
+            }
+        }
+    }
+
+    private fun okUp() {
+        okHeld = false
+        if (touchSent) { touch(MotionEvent.ACTION_UP); touchSent = false }
+    }
+
+    private fun releaseOk() {
+        if (touchSent) touch(MotionEvent.ACTION_CANCEL)
+        touchSent = false
+        okHeld = false
+    }
+
+    private fun tapAt(x: Float, y: Float) {
+        val hover = motion(MotionEvent.ACTION_HOVER_MOVE, InputDevice.SOURCE_MOUSE, x, y, SystemClock.uptimeMillis())
+        web.dispatchGenericMotionEvent(hover)
+        hover.recycle()
+        ui.postDelayed({
+            touch(MotionEvent.ACTION_DOWN, x, y)
+            ui.postDelayed({ touch(MotionEvent.ACTION_UP, x, y) }, 50)
+        }, 60)
     }
 
     /* ===================================================================== pointer */
 
-    private fun target(): View = customView ?: web
-
     private val hideCursor = Runnable { cursor.animate().alpha(0f).setDuration(400).start() }
 
     private fun showCursor() {
+        if (navStyle || isFs()) return
         cursor.visibility = View.VISIBLE
         cursor.animate().cancel()
         cursor.alpha = 1f
@@ -480,12 +498,13 @@ class MainActivity : Activity() {
         moveKey = code
         moveStart = SystemClock.uptimeMillis()
         lastFrameNs = 0L
-        step(code, 12f * root.height / 1080f, 0) // a small precise nudge on a short press
+        step(code, 12f * root.height / 1080f, 0) // a small precise step on a short press
         Choreographer.getInstance().removeFrameCallback(frame)
         Choreographer.getInstance().postFrameCallback(frame)
     }
 
     private fun stopMove() {
+        edgeKey = 0
         if (moveKey == 0) return
         moveKey = 0
         Choreographer.getInstance().removeFrameCallback(frame)
@@ -506,23 +525,55 @@ class MainActivity : Activity() {
         cursor.place(cx, cy)
         showCursor()
 
-        // Pushing against an edge scrolls whatever is under the pointer.
+        // Pushing against an edge scrolls the panel in that column (lecture list, page) — not the header.
         val now = SystemClock.uptimeMillis()
         val edge = 6f
         val atEdge = (dy > 0 && cy >= root.height - edge) || (dy < 0 && cy <= edge) ||
             (dx > 0 && cx >= root.width - edge) || (dx < 0 && cx <= edge)
-        if (atEdge && now - lastWheel > 45) {
-            lastWheel = now
-            val amt = 1f + min(held / 600f, 2.5f)
-            when {
-                dy > 0 -> wheelAt(cx, cy, 0f, -amt)
-                dy < 0 -> wheelAt(cx, cy, 0f, amt)
-                dx > 0 -> wheelAt(cx, cy, amt, 0f)
-                else -> wheelAt(cx, cy, -amt, 0f)
+        if (atEdge) {
+            if (edgeKey != code) findEdgeTarget(code)
+            if (now - lastWheel > 45) {
+                lastWheel = now
+                val amt = 1f + min(held / 600f, 2.5f)
+                val x = if (edgeX >= 0) edgeX else cx
+                val y = if (edgeY >= 0) edgeY else cy
+                when {
+                    dy > 0 -> wheelAt(x, y, 0f, -amt)
+                    dy < 0 -> wheelAt(x, y, 0f, amt)
+                    dx > 0 -> wheelAt(x, y, amt, 0f)
+                    else -> wheelAt(x, y, -amt, 0f)
+                }
             }
         }
         if (touchSent) touch(MotionEvent.ACTION_MOVE)
         else if (now - lastHover > 90) sendHover()
+    }
+
+    private fun findEdgeTarget(code: Int) {
+        edgeKey = code
+        edgeX = -1f
+        edgeY = -1f
+        val vertical = code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_DPAD_DOWN
+        val dir = if (code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1
+        web.evaluateJavascript("JSON.stringify(window.__tv ? __tv.scrollPoint(${cx / web.width}, ${cy / web.height}, $vertical, $dir) : null)") { r ->
+            val p = jsObject(r) ?: return@evaluateJavascript
+            if (edgeKey == code) {
+                edgeX = p.optDouble("fx").toFloat() * web.width
+                edgeY = p.optDouble("fy").toFloat() * web.height
+            }
+        }
+    }
+
+    /** ⏪ / ⏩ on pages: scroll a screen up / down (the panel under the pointer or the highlight). */
+    private fun scrollPage(v: Float) {
+        val dir = if (v > 0) -1 else 1
+        val point = if (navStyle) "__tv.navPoint()" else "{fx:${cx / web.width},fy:${cy / web.height}}"
+        web.evaluateJavascript("JSON.stringify(window.__tv ? (function(p){ p = p || {fx:0.5, fy:0.5}; return __tv.scrollPoint(p.fx, p.fy, true, $dir) || p; })($point) : null)") { r ->
+            val p = jsObject(r)
+            val x = p?.optDouble("fx")?.toFloat()?.times(web.width) ?: (root.width / 2f)
+            val y = p?.optDouble("fy")?.toFloat()?.times(web.height) ?: (root.height / 2f)
+            wheelAt(x, y, 0f, v * 6f)
+        }
     }
 
     private fun motion(action: Int, source: Int, x: Float, y: Float, downAt: Long, h: Float = 0f, v: Float = 0f): MotionEvent {
@@ -542,65 +593,22 @@ class MainActivity : Activity() {
     private fun sendHover() {
         lastHover = SystemClock.uptimeMillis()
         val ev = motion(MotionEvent.ACTION_HOVER_MOVE, InputDevice.SOURCE_MOUSE, cx, cy, lastHover)
-        target().dispatchGenericMotionEvent(ev)
+        web.dispatchGenericMotionEvent(ev)
         ev.recycle()
     }
 
     /** Mouse-wheel scroll. Positive v = up, positive h = right (Android axis convention). */
     private fun wheelAt(x: Float, y: Float, h: Float, v: Float) {
         val ev = motion(MotionEvent.ACTION_SCROLL, InputDevice.SOURCE_MOUSE, x, y, SystemClock.uptimeMillis(), h, v)
-        target().dispatchGenericMotionEvent(ev)
+        web.dispatchGenericMotionEvent(ev)
         ev.recycle()
     }
 
     private fun touch(action: Int, x: Float = cx, y: Float = cy) {
         if (action == MotionEvent.ACTION_DOWN) touchDownTime = SystemClock.uptimeMillis()
         val ev = motion(action, InputDevice.SOURCE_TOUCHSCREEN, x, y, touchDownTime)
-        target().dispatchTouchEvent(ev)
+        web.dispatchTouchEvent(ev)
         ev.recycle()
-    }
-
-    /** OK pressed: a text field opens the native input box, anything else gets a real tap. */
-    private fun okDown() {
-        showCursor()
-        okHeld = true
-        touchSent = false
-        if (customView != null) { touch(MotionEvent.ACTION_DOWN); touchSent = true; return }
-        val fx = cx / web.width
-        val fy = cy / web.height
-        web.evaluateJavascript("JSON.stringify(window.__tv ? __tv.hit($fx, $fy) : null)") { r ->
-            val info = jsObject(r)
-            if (info != null) {
-                okHeld = false
-                showTextInput(info)
-            } else {
-                touch(MotionEvent.ACTION_DOWN)
-                touchSent = true
-                if (!okHeld) { touch(MotionEvent.ACTION_UP); touchSent = false }
-            }
-        }
-    }
-
-    private fun okUp() {
-        okHeld = false
-        if (touchSent) { touch(MotionEvent.ACTION_UP); touchSent = false }
-    }
-
-    private fun releaseOk() {
-        if (touchSent) touch(MotionEvent.ACTION_CANCEL)
-        touchSent = false
-        okHeld = false
-    }
-
-    /** A real tap somewhere else on the page (used for the player's fullscreen button). */
-    private fun tapAt(x: Float, y: Float) {
-        val hover = motion(MotionEvent.ACTION_HOVER_MOVE, InputDevice.SOURCE_MOUSE, x, y, SystemClock.uptimeMillis())
-        web.dispatchGenericMotionEvent(hover)
-        hover.recycle()
-        ui.postDelayed({
-            touch(MotionEvent.ACTION_DOWN, x, y)
-            ui.postDelayed({ touch(MotionEvent.ACTION_UP, x, y) }, 60)
-        }, 120)
     }
 
     /* ===================================================================== native text input */
@@ -704,32 +712,38 @@ class MainActivity : Activity() {
 
     /* ===================================================================== fullscreen */
 
-    private fun toggleFullscreen() = if (isFs()) exitFullscreen() else enterFullscreen()
-
-    /** Press the player's own fullscreen button; fall back to the F shortcut, then to a CSS fullscreen. */
     private fun enterFullscreen() {
         if (!hasVideo) { osd("No video on this page"); return }
-        js("window.__tv && __tv.wake()")
-        ui.postDelayed({
-            web.evaluateJavascript("JSON.stringify(window.__tv ? __tv.fsButton() : null)") { r ->
-                val p = jsObject(r)
-                if (p != null) tapAt(p.optDouble("fx").toFloat() * web.width, p.optDouble("fy").toFloat() * web.height)
-                else sendKeyToPage(KeyEvent.KEYCODE_F)
-                ui.postDelayed({
-                    if (customView == null) {
-                        web.evaluateJavascript("(window.__tv && __tv.isFullscreen()) ? 1 : 0") { r2 ->
-                            if (r2 != "1") js("window.__tv && __tv.cssFullscreen(true)")
+        fsWanted = true
+        fsTries = 0
+        requestFullscreen()
+    }
+
+    /**
+     * Real fullscreen of the <video>: browsers only allow it from a user action, so we send a real
+     * F12 key that the page script turns into video.requestFullscreen(). If refused, the page
+     * stretches the video over the whole screen instead.
+     */
+    private fun requestFullscreen() {
+        lastFsTry = SystemClock.uptimeMillis()
+        ui.postDelayed({ // let a closing menu hand focus back to the page first
+            sendKeyToPage(KeyEvent.KEYCODE_F12)
+            ui.postDelayed({
+                if (customView == null && fsWanted) {
+                    web.evaluateJavascript("(window.__tv && __tv.isFullscreen()) ? 1 : 0") { r ->
+                        if (r != "1" && customView == null) {
+                            js("window.__tv && __tv.cssFullscreen(true)")
                             jsFs = true
                             onFsChanged()
                         }
                     }
-                }, 1200)
-            }
-        }, 220)
+                }
+            }, 1200)
+        }, 350)
     }
 
     private fun exitFullscreen() {
-        wantFsUntil = 0
+        fsWanted = false
         if (customView != null) {
             js("document.fullscreenElement && document.exitFullscreen()")
             ui.postDelayed({ if (customView != null) { customCallback?.onCustomViewHidden(); hideCustomView() } }, 400)
@@ -749,19 +763,26 @@ class MainActivity : Activity() {
         onFsChanged()
     }
 
+    private fun changeLecture(dir: Int) {
+        media(if (dir > 0) "next" else "prev")
+        fsTries = 0
+        lastFsTry = SystemClock.uptimeMillis() // give the new lecture a moment before restoring fullscreen
+    }
+
     /* ===================================================================== back */
 
     private fun onBack() {
         releaseOk()
         stopMove()
-        if (isFs()) { exitFullscreen(); return }
-        if (mode == Mode.REMOTE) { manualMode = true; setMode(Mode.POINTER); return }
-        when {
-            web.canGoBack() -> web.goBack()
-            SystemClock.uptimeMillis() - lastBack < 2000 -> finish()
-            else -> {
-                lastBack = SystemClock.uptimeMillis()
-                osd("Press Back again to exit", 2000)
+        web.evaluateJavascript("(window.__tv && __tv.back()) ? 1 : 0") { r ->
+            if (r == "1") return@evaluateJavascript // closed a popup / dialog
+            when {
+                web.canGoBack() -> web.goBack()
+                SystemClock.uptimeMillis() - lastBack < 2000 -> finish()
+                else -> {
+                    lastBack = SystemClock.uptimeMillis()
+                    osd("Press Back again to exit", 2000)
+                }
             }
         }
     }
@@ -779,21 +800,43 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun pointerLabel() = if (mode == Mode.POINTER) "Pointer: ON  (turn off)" else "Pointer: OFF  (turn on)"
+    private fun styleItem(): Pair<String, () -> Unit> =
+        if (navStyle) "Control style: Navigation  →  switch to Pointer" to { setNavStyle(false) }
+        else "Control style: Pointer  →  switch to Navigation" to { setNavStyle(true) }
+
+    private fun showMainMenu() {
+        val items = mutableListOf<Pair<String, () -> Unit>>()
+        if (hasVideo) {
+            items += "▶  Watch fullscreen (remote controls)" to { enterFullscreen() }
+            items += "Play / Pause" to { media("playpause") }
+            items += "Next lecture" to { media("next") }
+            items += "Previous lecture" to { media("prev") }
+            items += "Playback speed…" to { showSpeedMenu() }
+            items += "Captions" to { media("captions") }
+        }
+        items += styleItem()
+        items += "My Learning" to { web.loadUrl(HOME) }
+        items += "Search courses…" to { showSearch() }
+        items += "Go back" to { if (web.canGoBack()) web.goBack() }
+        items += "Go forward" to { if (web.canGoForward()) web.goForward() }
+        items += "Reload page" to { web.reload() }
+        items += "Settings…" to { showSettings() }
+        items += "Remote controls help" to { showHelp() }
+        items += "Exit app" to { finish() }
+        menu("Udemy TV", items)
+    }
 
     private fun showVideoMenu() = menu("Video", listOf(
         "Play / Pause" to { media("playpause") },
-        "Next lecture" to { media("next"); onLectureJump() },
-        "Previous lecture" to { media("prev"); onLectureJump() },
+        "Next lecture" to { changeLecture(1) },
+        "Previous lecture" to { changeLecture(-1) },
         "Playback speed…" to { showSpeedMenu() },
         "Captions on / off" to { media("captions") },
-        (if (isFs()) "Exit fullscreen" else "Fullscreen") to { toggleFullscreen() },
         "Forward 30 s" to { media("fwd30") },
         "Back 30 s" to { media("back30") },
         "Restart this lecture" to { media("restart") },
-        pointerLabel() to { togglePointer() },
+        "Exit fullscreen (back to ${if (navStyle) "navigation" else "pointer"})" to { exitFullscreen() },
         "Remote controls help" to { showHelp() },
-        "More (browser menu)…" to { showMainMenu() },
         "Exit app" to { finish() }
     ))
 
@@ -804,7 +847,7 @@ class MainActivity : Activity() {
         }.setOnDismissListener { web.requestFocus() }.show()
     }
 
-    private fun showMainMenu() {
+    private fun showSettings() {
         val zoom = prefs.getInt("zoom", 100)
         val width = prefs.getInt("width", 1280)
         val pspeed = prefs.getInt("pspeed", 0)
@@ -814,14 +857,8 @@ class MainActivity : Activity() {
             1280 -> "Fit TV (recommended)"
             else -> "Smaller, more content"
         }
-        menu("Udemy TV", listOf(
-            "My Learning" to { web.loadUrl(HOME) },
-            "Search courses…" to { showSearch() },
-            "Udemy home" to { web.loadUrl(SITE) },
-            "Go back" to { if (web.canGoBack()) web.goBack() },
-            "Go forward" to { if (web.canGoForward()) web.goForward() },
-            "Reload page" to { web.reload() },
-            pointerLabel() to { togglePointer() },
+        menu("Settings", listOf(
+            styleItem(),
             "Pointer speed: ${POINTER_SPEED_NAMES[pspeed]}  (change)" to {
                 val next = (pspeed + 1) % POINTER_SPEEDS.size
                 prefs.edit().putInt("pspeed", next).apply()
@@ -844,30 +881,27 @@ class MainActivity : Activity() {
                 web.reload()
                 osd("Tracker blocking ${if (blockTrackers) "ON" else "OFF"}")
             },
-            "Remote controls help" to { showHelp() },
-            "Sign out & clear data" to { confirmSignOut() },
-            "Exit app" to { finish() }
+            "Sign out & clear data" to { confirmSignOut() }
         ))
     }
 
     private fun showHelp() {
         dialog().setTitle("Remote controls")
             .setMessage(
-                "FULLSCREEN VIDEO\n" +
+                "FULLSCREEN VIDEO  (☰ → Watch fullscreen)\n" +
                 "  OK or ⏯  —  play / pause\n" +
-                "  OK or ⏯ twice  —  fullscreen on / off\n" +
-                "  ▶ / ◀  —  forward / back 5 s (hold to keep going)\n" +
-                "  ▶▶ / ◀◀ (press twice)  —  next / previous lecture\n" +
-                "  ⏩ / ⏪  —  next / previous lecture\n" +
+                "  ◀ / ▶  —  back / forward 5 s  (hold to keep going)\n" +
                 "  ▲ / ▼  —  faster / slower\n" +
-                "  ▲▲  —  normal speed      ▼▼  —  captions on / off\n" +
-                "  Back  —  leave fullscreen      ☰  —  video menu\n\n" +
-                "PAGES (pointer)\n" +
-                "  Arrows  —  move the pointer (hold to go faster)\n" +
-                "  OK  —  click (on a text box: type with the keyboard)\n" +
-                "  ⏪ / ⏩  —  scroll up / down      push pointer to the edge  —  scroll\n" +
-                "  ⏯ twice  —  video fullscreen\n" +
-                "  Back  —  previous page      ☰  —  menu (pointer on/off, search, …)"
+                "  ⏪ / ⏩  —  previous / next lecture\n" +
+                "  Back  —  exit fullscreen        ☰  —  video menu\n\n" +
+                "PAGES — Pointer style (default)\n" +
+                "  Arrows  —  move the pointer (hold = faster)\n" +
+                "  OK  —  click   (on a text box: type with the keyboard)\n" +
+                "  Push the pointer against an edge, or ⏪ / ⏩  —  scroll\n\n" +
+                "PAGES — Navigation style (☰ → Control style)\n" +
+                "  Arrows  —  move the highlight     OK  —  open / click\n" +
+                "  ⏪ / ⏩  —  scroll a screen\n\n" +
+                "Everywhere:  ⏯ play / pause   Back  —  close popup / previous page   ☰  —  menu"
             )
             .setPositiveButton("Got it", null)
             .setOnDismissListener { web.requestFocus() }
@@ -908,8 +942,9 @@ class MainActivity : Activity() {
             if (customView != null) { callback.onCustomViewHidden(); return }
             customView = view
             customCallback = callback
-            js("window.__tv && __tv.cssFullscreen(false)") // real fullscreen won; drop any CSS fallback
+            js("window.__tv && __tv.cssFullscreen(false)") // real fullscreen won; drop any fallback
             jsFs = false
+            fsWanted = true
             root.addView(view, 1, FrameLayout.LayoutParams(MATCH, MATCH))
             web.visibility = View.GONE
             hasVideo = true
