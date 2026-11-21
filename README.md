@@ -2,28 +2,28 @@
 
 A personal Fire TV app for udemy.com, built for the remote.
 
-## Two modes (switches automatically)
-
-**Pointer mode** – all normal pages (login, My Learning, course pages, Q&A, Cloudflare check):
+## Pages: pointer
 
 | Button | Action |
 |---|---|
-| ◀ ▲ ▼ ▶ | Move the mouse pointer (hold to speed up). Pushing against a screen edge scrolls. |
-| OK | Click / tap (hold OK + arrows = drag) |
-| ⏪ / ⏩ | Scroll page up / down |
-| ⏯ | Jump to video controls (when a lecture video is on screen) |
-| Back | Previous page (press twice on the first page to exit) |
-| ☰ | Menu: My Learning, Reload, Screen layout, Text size, Sign out, Exit |
+| ◀ ▲ ▼ ▶ | Glide the pointer (short press = small step, hold = faster) |
+| OK | Click. On a text box (email, password, OTP, search, Q&A) a fast native input box opens |
+| ⏪ / ⏩ | Scroll up / down (or push the pointer against a screen edge) |
+| ⏯ twice | Video fullscreen |
+| Back | Previous page (twice on the first page = exit) |
+| ☰ | Menu: My Learning, Search, Back/Forward, Pointer on/off, Pointer speed, Screen layout, Text size, Faster browsing, Help, Sign out |
 
-**Video mode** – turns on by itself when a lecture video is on screen:
+## Fullscreen video: remote controls (automatic)
 
-| Button | Action |
-|---|---|
-| OK / ⏯ | Play / pause |
-| ◀ ▶ (and ⏪ ⏩) | Back / forward 10 s (hold to keep skipping) |
-| ▲ ▼ | Speed up / slow down (0.5× – 2×) |
-| ☰ | Video menu: speed list, next / previous lecture, fullscreen, use pointer, … |
-| Back | Leave fullscreen, otherwise switch to the pointer (captions, notes, lecture list) |
+| Button | Single press | Double press |
+|---|---|---|
+| OK / ⏯ | Play / pause | Fullscreen on / off |
+| ▶ / ◀ | +5 s / −5 s (hold to keep skipping) | Next / previous lecture |
+| ▲ | Faster | Normal speed (1×) |
+| ▼ | Slower | Captions on / off |
+| ⏩ / ⏪ | Next / previous lecture | |
+| Back | Leave fullscreen | |
+| ☰ | Video menu: speed list, captions, ±30 s, restart, pointer on/off, help | |
 
 ## Install / update on Fire TV
 
