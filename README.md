@@ -1,37 +1,38 @@
 # Udemy TV (Fire TV)
 
-A personal Fire TV app that opens udemy.com full-screen and lets you use it with the **remote** (no mouse cursor).
+A personal Fire TV app for udemy.com, built for the remote.
 
-## Remote controls
+## Two modes (switches automatically)
 
-| Button | What it does |
+**Pointer mode** – all normal pages (login, My Learning, course pages, Q&A, Cloudflare check):
+
+| Button | Action |
 |---|---|
-| ◀ ▲ ▼ ▶ | Move the yellow highlight between items. Scrolls when reading long text. |
-| OK | Open / click the highlighted item. On a text box it opens the keyboard. |
-| Back | Close a popup or keyboard, otherwise go back a page. Press twice on the first page to exit. |
-| ⏯ Play/Pause | Play or pause the lecture video |
-| ⏪ / ⏩ | Skip back / forward 10 seconds |
-| ☰ Menu | My Learning, Reload, Video fullscreen, Text size, Desktop site, Sign out, Exit |
+| ◀ ▲ ▼ ▶ | Move the mouse pointer (hold to speed up). Pushing against a screen edge scrolls. |
+| OK | Click / tap (hold OK + arrows = drag) |
+| ⏪ / ⏩ | Scroll page up / down |
+| ⏯ | Jump to video controls (when a lecture video is on screen) |
+| Back | Previous page (press twice on the first page to exit) |
+| ☰ | Menu: My Learning, Reload, Screen layout, Text size, Sign out, Exit |
 
-When the **video itself** is highlighted: ◀ ▶ skip 10 s, OK plays/pauses.
-In fullscreen video: ◀ ▶ skip, OK plays/pauses, Back leaves fullscreen.
+**Video mode** – turns on by itself when a lecture video is on screen:
 
-## Install on Fire TV
+| Button | Action |
+|---|---|
+| OK / ⏯ | Play / pause |
+| ◀ ▶ (and ⏪ ⏩) | Back / forward 10 s (hold to keep skipping) |
+| ▲ ▼ | Speed up / slow down (0.5× – 2×) |
+| ☰ | Video menu: speed list, next / previous lecture, fullscreen, use pointer, … |
+| Back | Leave fullscreen, otherwise switch to the pointer (captions, notes, lecture list) |
 
-1. Fire TV: Developer Options → **ADB debugging ON**, **Install unknown apps → Downloader ON**.
-2. Open **Downloader**, enter the APK link from the repo's **Releases → latest → udemy-tv.apk**.
-3. Install, then open **Udemy TV** from *Your Apps & Channels*.
-4. Sign in with your email (code or password).
+## Install / update on Fire TV
 
-Updates: push to `main` → GitHub Actions builds a new APK → install it the same way (it replaces the old one, login is kept).
+Downloader → `https://github.com/devdatta95/udemy-tv/releases/download/latest/udemy-tv.apk` → Install.
 
 ## Build
 
-GitHub Actions builds `udemy-tv.apk` on every push (`.github/workflows/build.yml`).
-Local build: open the folder in Android Studio and run *Build → Build APK(s)*.
-
-Signing uses repository secrets `KEYSTORE_B64`, `KS_PASS`, `KEY_ALIAS`, `KEY_PASS`; without them a debug key is used.
+GitHub Actions builds `udemy-tv.apk` on every push to `main` and publishes it as the `latest` release.
 
 ## Debugging
 
-The WebView is debuggable: with the stick on ADB (`adb connect <stick-ip>:5555`), open `chrome://inspect` on your laptop.
+The WebView is debuggable: `adb connect <stick-ip>:5555`, then open `chrome://inspect` on a laptop.
